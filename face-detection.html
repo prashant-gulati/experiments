@@ -195,11 +195,17 @@
   // Inference loop: runs as fast as the model allows, independent of rAF.
   async function inferenceLoop() {
     while (true) {
-      if (model && video.readyState >= 2) {
-        latestPredictions = await model.estimateFaces(video, false /* returnTensors */);
-        if (latestPredictions.length > 0) status.textContent = '';
-      } else {
-        await new Promise(r => setTimeout(r, 50));
+      try {
+        if (model && video.readyState >= 2) {
+          latestPredictions = await model.estimateFaces(video, false /* returnTensors */);
+          if (latestPredictions.length > 0) status.textContent = '';
+        } else {
+          await new Promise(r => setTimeout(r, 50));
+        }
+      } catch (e) {
+        console.warn('Inference error, retrying:', e);
+        latestPredictions = [];
+        await new Promise(r => setTimeout(r, 100));
       }
     }
   }
