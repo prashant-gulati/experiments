@@ -89,6 +89,7 @@
 
   let model = null;
   let animFrameId = null;
+  let latestPredictions = [];
 
   // ── 1. Start camera ──────────────────────────────────────────────────────────
   async function startCamera() {
@@ -120,7 +121,7 @@
     status.textContent = 'Model ready — point at a face!';
   }
 
-  // ── 3. Detection loop ────────────────────────────────────────────────────────
+  // ── 3. Detection loops ───────────────────────────────────────────────────────
   function syncCanvasSize() {
     if (canvas.width  !== video.videoWidth ||
         canvas.height !== video.videoHeight) {
@@ -177,29 +178,30 @@
     }
   }
 
-  async function detect() {
-    if (!model || video.readyState < 2) {
-      animFrameId = requestAnimationFrame(detect);
-      return;
-    }
-
+  // Render loop: runs at 60 fps, always draws from the latest predictions.
+  function renderLoop() {
     syncCanvasSize();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    latestPredictions.forEach(drawBox);
 
-    const predictions = await model.estimateFaces(video, false /* returnTensors */);
-
-    predictions.forEach(drawBox);
-
-    const n = predictions.length;
+    const n = latestPredictions.length;
     faceCount.textContent = n === 0 ? 'No face detected'
                           : n === 1 ? '1 face'
                           :           `${n} faces`;
 
-    if (predictions.length > 0) {
-      status.textContent = '';
-    }
+    animFrameId = requestAnimationFrame(renderLoop);
+  }
 
-    animFrameId = requestAnimationFrame(detect);
+  // Inference loop: runs as fast as the model allows, independent of rAF.
+  async function inferenceLoop() {
+    while (true) {
+      if (model && video.readyState >= 2) {
+        latestPredictions = await model.estimateFaces(video, false /* returnTensors */);
+        if (latestPredictions.length > 0) status.textContent = '';
+      } else {
+        await new Promise(r => setTimeout(r, 50));
+      }
+    }
   }
 
   // ── 4. Boot ──────────────────────────────────────────────────────────────────
@@ -207,7 +209,8 @@
     try {
       await startCamera();
       await loadModel();
-      detect();
+      inferenceLoop();  // fire-and-forget; updates latestPredictions at model speed
+      renderLoop();     // draws latestPredictions at 60 fps
     } catch (e) {
       console.error(e);
       status.style.color = '#ff4444';
