@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Face Detection</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: -apple-system, sans-serif;
+      color: #fff;
+      overflow: hidden;
+    }
+
+    #container {
+      position: relative;
+      width: 100%;
+      max-width: 640px;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      border-radius: 12px;
+      /* Mirror the front camera so it feels natural */
+      transform: scaleX(-1);
+    }
+
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      border-radius: 12px;
+      /* Mirror canvas to match mirrored video */
+      transform: scaleX(-1);
+    }
+
+    #status {
+      margin-top: 16px;
+      font-size: 14px;
+      color: #aaa;
+      text-align: center;
+      min-height: 20px;
+    }
+
+    #face-count {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="container">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+  <div id="face-count">Loading…</div>
+</div>
+<div id="status">Loading face detection model…</div>
+
+<!-- TensorFlow.js core -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<!-- BlazeFace: lightweight face detection model optimized for mobile -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.1.0/dist/blazeface.min.js"></script>
+
+<script>
+  const video  = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+  const status = document.getElementById('status');
+  const faceCount = document.getElementById('face-count');
+
+  let model = null;
+  let animFrameId = null;
+
+  // ── 1. Start camera ──────────────────────────────────────────────────────────
+  async function startCamera() {
+    const constraints = {
+      video: {
+        facingMode: 'user',      // front camera
+        width:  { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+      audio: false,
+    };
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = stream;
+      return new Promise(resolve => { video.onloadedmetadata = resolve; });
+    } catch (err) {
+      const msg = err.name === 'NotAllowedError'
+        ? 'Camera permission denied. Please allow camera access and reload.'
+        : `Camera error: ${err.message}`;
+      status.textContent = msg;
+      throw err;
+    }
+  }
+
+  // ── 2. Load BlazeFace model ──────────────────────────────────────────────────
+  async function loadModel() {
+    model = await blazeface.load();
+    status.textContent = 'Model ready — point at a face!';
+  }
+
+  // ── 3. Detection loop ────────────────────────────────────────────────────────
+  function syncCanvasSize() {
+    if (canvas.width  !== video.videoWidth ||
+        canvas.height !== video.videoHeight) {
+      canvas.width  = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+  }
+
+  function drawBox(pred) {
+    const [x, y] = pred.topLeft;
+    const [x2, y2] = pred.bottomRight;
+    const w = x2 - x;
+    const h = y2 - y;
+    const prob = Math.round(pred.probability[0] * 100);
+
+    // Bounding box
+    ctx.strokeStyle = '#00FF88';
+    ctx.lineWidth   = 3;
+    ctx.strokeRect(x, y, w, h);
+
+    // Corner accents
+    const corner = 16;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth   = 4;
+    [[x, y, corner, 0, 0, corner],
+     [x+w, y, -corner, 0, 0, corner],
+     [x, y+h, corner, 0, 0, -corner],
+     [x+w, y+h, -corner, 0, 0, -corner]].forEach(([cx, cy, dx1, dy1, dx2, dy2]) => {
+      ctx.beginPath();
+      ctx.moveTo(cx + dx1, cy + dy1);
+      ctx.lineTo(cx, cy);
+      ctx.lineTo(cx + dx2, cy + dy2);
+      ctx.stroke();
+    });
+
+    // Confidence label
+    ctx.fillStyle    = '#00FF88';
+    ctx.font         = 'bold 14px -apple-system, sans-serif';
+    ctx.textBaseline = 'bottom';
+    const label = `Face  ${prob}%`;
+    const tw    = ctx.measureText(label).width;
+    ctx.fillRect(x - 1, y - 22, tw + 10, 22);
+    ctx.fillStyle = '#000';
+    ctx.fillText(label, x + 4, y - 4);
+
+    // Landmark dots
+    if (pred.landmarks) {
+      ctx.fillStyle = '#FFD700';
+      pred.landmarks.forEach(([lx, ly]) => {
+        ctx.beginPath();
+        ctx.arc(lx, ly, 3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+  }
+
+  async function detect() {
+    if (!model || video.readyState < 2) {
+      animFrameId = requestAnimationFrame(detect);
+      return;
+    }
+
+    syncCanvasSize();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const predictions = await model.estimateFaces(video, false /* returnTensors */);
+
+    predictions.forEach(drawBox);
+
+    const n = predictions.length;
+    faceCount.textContent = n === 0 ? 'No face detected'
+                          : n === 1 ? '1 face'
+                          :           `${n} faces`;
+
+    if (predictions.length > 0) {
+      status.textContent = '';
+    }
+
+    animFrameId = requestAnimationFrame(detect);
+  }
+
+  // ── 4. Boot ──────────────────────────────────────────────────────────────────
+  (async () => {
+    try {
+      await startCamera();
+      await loadModel();
+      detect();
+    } catch (e) {
+      console.error(e);
+    }
+  })();
+</script>
+
+</body>
+</html>
